@@ -1,0 +1,7 @@
+[project]
+name = "rag-multimodal-agentique"
+version = "0.1.0"
+description = "Activité pratique 3 : recherche multimodale et agent documentaire"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = []
