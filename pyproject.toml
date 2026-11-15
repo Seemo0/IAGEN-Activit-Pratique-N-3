@@ -5,6 +5,7 @@ description = "Activité pratique 3 : recherche multimodale et agent documentair
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "chromadb>=1.5.9",
     "ipykernel>=7.4.0",
     "open-clip-torch>=4.2.2",
     "pillow>=13.0.0",

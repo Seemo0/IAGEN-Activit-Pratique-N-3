@@ -1,4 +1,4 @@
-"""Extraction du PDF et embeddings multimodaux avec CLIP."""
+"""Extraction du PDF, embeddings multimodaux et indexation ChromaDB."""
 
 from pathlib import Path
 
@@ -141,3 +141,73 @@ class EncodeurCLIP:
                 embeddings = self.modele.encode_image(lot).float()
                 vecteurs.append(F.normalize(embeddings, dim=-1).cpu())
         return torch.cat(vecteurs)
+
+
+
+def ouvrir_collection(nom_modele="ViT-B-32", poids="laion2b_s34b_b79k",
+                      db_path="chroma_pdf"):
+    """Ouvrir une collection persistante propre au modèle et à ses poids."""
+    import hashlib
+    import chromadb
+
+    signature = hashlib.sha256(f"{nom_modele}:{poids}".encode()).hexdigest()[:12]
+    client = chromadb.PersistentClient(path=str(db_path))
+    collection = client.get_or_create_collection(
+        name=f"pdf_clip_{signature}",
+        embedding_function=None,
+        configuration={"hnsw": {"space": "cosine"}},
+        metadata={"modele": nom_modele, "poids": poids}
+    )
+    if collection.configuration["hnsw"]["space"] != "cosine":
+        raise ValueError("La collection existante n’utilise pas la distance cosinus.")
+    return collection
+
+
+def indexer_pdf(collection, pdf_path, fragments, images,
+                embeddings_textes, embeddings_images):
+    """Remplacer l’index de ce PDF sans conserver de doublons ou anciens fragments."""
+    import hashlib
+    import torch
+
+    pdf_path = Path(pdf_path)
+    document_id = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+    source_pdf = str(pdf_path.resolve())
+
+    # Vérifier les données avant de modifier la collection.
+    for elements, vecteurs in [(fragments, embeddings_textes), (images, embeddings_images)]:
+        if vecteurs.ndim != 2 or vecteurs.shape != (len(elements), 512):
+            raise ValueError("Les embeddings doivent correspondre aux éléments (N, 512).")
+        if not torch.isfinite(vecteurs).all():
+            raise ValueError("Les embeddings contiennent des valeurs non finies.")
+        if not torch.allclose(vecteurs.norm(dim=1),
+                              torch.ones(len(elements), device=vecteurs.device), atol=1e-5):
+            raise ValueError("Les embeddings doivent être normalisés.")
+
+    ids, documents, metadatas, embeddings = [], [], [], []
+    commun = {"document_id": document_id, "pdf": pdf_path.name, "source_pdf": source_pdf}
+    for fragment, vecteur in zip(fragments, embeddings_textes):
+        page, numero = fragment["page"], fragment["fragment"]
+        ids.append(f"{document_id}:texte:{page}:{numero}")
+        documents.append(fragment["texte"])
+        metadatas.append({**commun, "type": "texte", "page": page, "fragment": numero,
+                          "source": str(Path(fragment["source"]).resolve())})
+        embeddings.append(vecteur.tolist())
+    for image, vecteur in zip(images, embeddings_images):
+        chemin = Path(image["source"])
+        ids.append(f"{document_id}:image:{image['page']}:{chemin.name}")
+        documents.append(f"Image du PDF {pdf_path.name}, page {image['page']}")
+        metadatas.append({**commun, "type": "image", "page": image["page"],
+                          "source": str(chemin.resolve())})
+        embeddings.append(vecteur.tolist())
+    if not ids or len(set(ids)) != len(ids):
+        raise ValueError("Les éléments doivent avoir des identifiants uniques et non vides.")
+
+    # Même contenu, ou nouvelle version du fichier au même emplacement.
+    collection.delete(where={"$or": [
+        {"document_id": document_id}, {"source_pdf": source_pdf}
+    ]})
+    for debut in range(0, len(ids), 64):
+        fin = debut + 64
+        collection.upsert(ids=ids[debut:fin], documents=documents[debut:fin],
+                          metadatas=metadatas[debut:fin], embeddings=embeddings[debut:fin])
+    return document_id
