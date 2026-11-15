@@ -211,3 +211,73 @@ def indexer_pdf(collection, pdf_path, fragments, images,
         collection.upsert(ids=ids[debut:fin], documents=documents[debut:fin],
                           metadatas=metadatas[debut:fin], embeddings=embeddings[debut:fin])
     return document_id
+
+
+def rechercher(collection, encodeur, texte=None, image=None, k=5,
+               type_resultat=None, document_id=None):
+    """Rechercher les voisins d’un texte ou d’une image dans l’index CLIP."""
+    if (texte is None) == (image is None):
+        raise ValueError("Fournir soit un texte, soit une image.")
+    if texte is not None and (not isinstance(texte, str) or not texte.strip()):
+        raise ValueError("La requête textuelle doit être non vide.")
+    if image is not None and not Path(image).is_file():
+        raise FileNotFoundError(f"Image introuvable : {image}")
+    if type(k) is not int or k < 1:
+        raise ValueError("k doit être un entier strictement positif.")
+    if type_resultat not in (None, "texte", "image"):
+        raise ValueError("Le type de résultat doit être 'texte', 'image' ou None.")
+    if (collection.metadata.get("modele") != encodeur.nom_modele
+            or collection.metadata.get("poids") != encodeur.poids):
+        raise ValueError("Utiliser le même modèle CLIP que pour l’indexation.")
+    if collection.configuration["hnsw"]["space"] != "cosine":
+        raise ValueError("La collection doit utiliser la distance cosinus.")
+
+    filtres = []
+    if type_resultat is not None:
+        filtres.append({"type": type_resultat})
+    if document_id is not None:
+        filtres.append({"document_id": document_id})
+    options = {}
+    if filtres:
+        options["where"] = filtres[0] if len(filtres) == 1 else {"$and": filtres}
+        nombre = len(collection.get(include=[], **options)["ids"])
+    else:
+        nombre = collection.count()
+    if nombre == 0:
+        return []
+
+    vecteur = (encodeur.encoder_textes([texte.strip()])[0] if texte is not None
+               else encodeur.encoder_images([image])[0])
+    reponse = collection.query(
+        query_embeddings=[vecteur.tolist()], n_results=min(k, nombre),
+        include=["documents", "metadatas", "distances"], **options
+    )
+    resultats = []
+    for identifiant, contenu, metadata, distance in zip(
+        reponse["ids"][0], reponse["documents"][0],
+        reponse["metadatas"][0], reponse["distances"][0]
+    ):
+        resultats.append({**metadata, "id": identifiant, "contenu": contenu,
+                          "distance": float(distance), "similarite": 1 - float(distance)})
+    return sorted(resultats, key=lambda resultat: resultat["distance"])
+
+
+def afficher_resultats(resultats):
+    """Afficher les passages et les aperçus d’images avec leurs sources."""
+    from IPython.display import display
+    from PIL import Image
+
+    if not resultats:
+        print("Aucun résultat pour ces filtres.")
+    for rang, resultat in enumerate(resultats, start=1):
+        print(f"{rang}. {resultat['type'].upper()} | {resultat['pdf']} | "
+              f"Page {resultat['page']} | Similarité : {resultat['similarite']:.4f}")
+        print("Source :", resultat["source"])
+        if resultat["type"] == "texte":
+            print(resultat["contenu"])
+        else:
+            with Image.open(resultat["source"]) as image:
+                apercu = image.convert("RGB")
+                apercu.thumbnail((600, 600))
+                display(apercu)
+        print()
